@@ -1,0 +1,283 @@
+import os
+import json
+from sqlalchemy import text
+from langchain_mistralai import ChatMistralAI
+from database.connection import get_db_schema, SessionLocalRO
+from database.business_glossary import BUSINESS_GLOSSARY
+from ai.prompts.sql_prompt import SQL_GENERATOR_PROMPT, SQL_FIXER_PROMPT
+from ai.prompts.response_prompt import RESPONSE_ANALYSIS_PROMPT
+from ai.prompts.chart_prompt import CHART_DECISION_PROMPT
+from graph.state import AnalyticsState
+
+# Initialize Mistral AI model
+model_name = os.getenv("MODEL_NAME", "mistral-large-latest")
+api_key = os.getenv("MISTRAL_API_KEY")
+llm = ChatMistralAI(
+    model=model_name,
+    mistral_api_key=api_key,
+    temperature=0.0
+)
+
+def get_content_string(content) -> str:
+    """Helper to convert list or text types returned by Gemini to strings."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and "text" in part:
+                parts.append(part["text"])
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+def clean_sql_output(sql) -> str:
+    """Removes backticks and wraps from generated SQL statements."""
+    sql = get_content_string(sql).strip()
+    if sql.startswith("```"):
+        lines = sql.split("\n")
+        if lines[0].startswith("```sql") or lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        sql = "\n".join(lines).strip()
+    if sql.startswith("`") and sql.endswith("`"):
+        sql = sql.strip("`").strip()
+        if sql.startswith("sql"):
+            sql = sql[3:].strip()
+    if sql.endswith(";"):
+        sql = sql[:-1].strip()
+    return sql
+
+def clean_json_output(json_str) -> str:
+    """Removes backticks and wraps from LLM json output."""
+    json_str = get_content_string(json_str).strip()
+    if json_str.startswith("```"):
+        lines = json_str.split("\n")
+        if lines[0].startswith("```json") or lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        json_str = "\n".join(lines).strip()
+    return json_str
+
+def intent_node(state: AnalyticsState) -> dict:
+    """Understands user requirement and classifies the intent."""
+    question = state.get("question", "")
+    
+    prompt = f"""You are an expert NLP classifier.
+Classify the user requirement for this question: "{question}".
+Identify the query intent from these types:
+- aggregation
+- comparison
+- trend
+- ranking
+- filtering
+- visualization request
+
+Also decide if the user explicitly requested or strongly implied a chart or visualization.
+Generate a valid JSON object only with structure:
+{{
+  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request",
+  "visualization": true | false
+}}
+"""
+    try:
+        res = llm.invoke(prompt)
+        content = clean_json_output(res.content)
+        intent_data = json.loads(content)
+        return {"intent": json.dumps(intent_data)}
+    except Exception as e:
+        # Default fallback intent
+        return {"intent": json.dumps({"type": "aggregation", "visualization": False})}
+
+def sql_generator_node(state: AnalyticsState) -> dict:
+    """Generates SQLite SELECT query based on schema and business rules."""
+    question = state.get("question", "")
+    history = state.get("history", [])
+    schema = get_db_schema()
+    
+    prompt = SQL_GENERATOR_PROMPT.format(
+        schema=schema,
+        business_glossary=BUSINESS_GLOSSARY,
+        history=str(history),
+        question=question
+    )
+    
+    res = llm.invoke(prompt)
+    sql = clean_sql_output(res.content)
+    
+    return {
+        "sql": sql,
+        "validation_error": None,
+        "retry_count": 0
+    }
+
+def sql_validator_node(state: AnalyticsState) -> dict:
+    """Validates query security parameters and syntax structures."""
+    sql = state.get("sql", "")
+    if not sql:
+        return {"validation_error": "No SQL query generated."}
+        
+    cleaned_sql = sql.strip().upper()
+    forbidden = ["DROP", "DELETE", "UPDATE", "INSERT", "ALTER", "ATTACH", "PRAGMA"]
+    for keyword in forbidden:
+        if f" {keyword} " in f" {cleaned_sql} " or cleaned_sql.startswith(keyword):
+            return {"validation_error": f"Security violation: Forbidden keyword '{keyword}' detected. Only SELECT operations are permitted."}
+            
+    if not cleaned_sql.startswith("SELECT"):
+        return {"validation_error": "Security violation: Query must be a SELECT statement."}
+        
+    # Syntax compile check using SQLite EXPLAIN (Safe check: compiles but does not execute)
+    db = SessionLocalRO()
+    try:
+        db.execute(text(f"EXPLAIN {sql}"))
+        error = None
+    except Exception as e:
+        error = f"SQLite compile error: {str(e)}"
+    finally:
+        db.close()
+        
+    return {"validation_error": error}
+
+def sql_fix_node(state: AnalyticsState) -> dict:
+    """Corrects SQL when validations or executions fail."""
+    question = state.get("question", "")
+    failed_sql = state.get("sql", "")
+    error_message = state.get("validation_error", "")
+    schema = get_db_schema()
+    retry_count = state.get("retry_count", 0)
+    
+    prompt = SQL_FIXER_PROMPT.format(
+        schema=schema,
+        business_glossary=BUSINESS_GLOSSARY,
+        question=question,
+        failed_sql=failed_sql,
+        error_message=error_message
+    )
+    
+    res = llm.invoke(prompt)
+    fixed_sql = clean_sql_output(res.content)
+    
+    return {
+        "sql": fixed_sql,
+        "retry_count": retry_count + 1
+    }
+
+def query_execution_node(state: AnalyticsState) -> dict:
+    """Executes the validated SQL query on the SQLite DB."""
+    sql = state.get("sql", "")
+    validation_error = state.get("validation_error", "")
+    
+    if validation_error:
+        return {"query_result": []}
+        
+    db = SessionLocalRO()
+    try:
+        result = db.execute(text(sql))
+        columns = result.keys()
+        rows = [dict(zip(columns, row)) for row in result.fetchall()]
+        db.close()
+        return {
+            "query_result": rows,
+            "validation_error": None
+        }
+    except Exception as e:
+        db.close()
+        return {
+            "validation_error": f"SQLite runtime error: {str(e)}"
+        }
+
+def result_analysis_node(state: AnalyticsState) -> dict:
+    """Translates SQL output into business insights."""
+    question = state.get("question", "")
+    sql = state.get("sql", "")
+    query_result = state.get("query_result", [])
+    validation_error = state.get("validation_error", "")
+    
+    if validation_error:
+        return {"answer": f"### Error\nI encountered an error trying to process this request:\n\n`{validation_error}`"}
+        
+    if not query_result:
+        return {"answer": "### Summary\nNo records were found in the database that match your query parameters.\n\n### Key Details\n- Empty database result set returned.\n\n### Strategic Insights\n- Verify circles, vendor names, or date ranges in your input question."}
+        
+    prompt = RESPONSE_ANALYSIS_PROMPT.format(
+        question=question,
+        sql=sql,
+        query_result=str(query_result[:50])  # limit tokens
+    )
+    
+    res = llm.invoke(prompt)
+    return {"answer": get_content_string(res.content)}
+
+def visualization_node(state: AnalyticsState) -> dict:
+    """Decides if chart is required and returns formatting structure."""
+    question = state.get("question", "")
+    sql = state.get("sql", "")
+    query_result = state.get("query_result", [])
+    intent = state.get("intent", "")
+    validation_error = state.get("validation_error", "")
+    
+    if validation_error or not query_result or len(query_result) < 2:
+        return {"chart": {}}
+        
+    prompt = CHART_DECISION_PROMPT.format(
+        question=question,
+        sql=sql,
+        query_result=str(query_result[:50]),
+        intent=intent
+    )
+    
+    try:
+        res = llm.invoke(prompt)
+        content = clean_json_output(res.content)
+        chart_data = json.loads(content)
+        if chart_data.get("generate_chart", False):
+            sample_row = query_result[0]
+            x_col = chart_data.get("x")
+            y_col = chart_data.get("y")
+            
+            # Case-insensitive column matching to prevent mismatch errors
+            actual_cols = list(sample_row.keys())
+            matched_x = next((c for c in actual_cols if c.lower() == str(x_col).lower()), None)
+            matched_y = next((c for c in actual_cols if c.lower() == str(y_col).lower()), None)
+            
+            if matched_x and matched_y:
+                # Helper to check if a value is numeric
+                def is_numeric(val) -> bool:
+                    if isinstance(val, (int, float)):
+                        return True
+                    if isinstance(val, str):
+                        try:
+                            float(val)
+                            return True
+                        except ValueError:
+                            return False
+                    return False
+
+                # Runtime check: Ensure Y is numeric and X is categorical.
+                # If X is numeric and Y is not numeric, swap them to prevent blank charts.
+                x_val = sample_row[matched_x]
+                y_val = sample_row[matched_y]
+                if chart_data.get("type", "").lower() != "scatter" and is_numeric(x_val) and not is_numeric(y_val):
+                    matched_x, matched_y = matched_y, matched_x
+
+                return {
+                    "chart": {
+                        "type": chart_data.get("type"),
+                        "x": matched_x,
+                        "y": matched_y,
+                        "title": chart_data.get("title")
+                    }
+                }
+        return {"chart": {}}
+    except Exception:
+        return {"chart": {}}
+
+
+def final_response_node(state: AnalyticsState) -> dict:
+    """Prepares final state structure for routing API."""
+    return state

@@ -1,0 +1,34 @@
+# Dependency directories
+node_modules/
+frontend/node_modules/
+
+# Python cache / virtual envs
+__pycache__/
+backend/**/__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+ENV/
+
+# Local configuration / API keys
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Databases
+backend/database/procurement.db
+
+# Temporary directories
+backend/temp_reports/
+
+# IDE files
+.vscode/
+.idea/
+
+# Frontend build outputs
+dist/
+build/
+.vite/
+.eslintcache
