@@ -14,7 +14,7 @@ from graph.nodes import (
 def route_after_validation(state: AnalyticsState) -> str:
     """Routes state based on validation status and retry count."""
     if state.get("validation_error"):
-        if state.get("retry_count", 0) >= 3:
+        if state.get("retry_count", 0) >= 3 or state.get("validation_error") == "unrelated":
             return "result_analysis"
         return "sql_fix"
     return "query_execution"

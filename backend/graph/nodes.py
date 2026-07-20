@@ -71,17 +71,18 @@ def intent_node(state: AnalyticsState) -> dict:
     prompt = f"""You are an expert NLP classifier.
 Classify the user requirement for this question: "{question}".
 Identify the query intent from these types:
-- aggregation
-- comparison
-- trend
-- ranking
-- filtering
-- visualization request
+- aggregation: For summarizing, grouping, counting, or averaging procurement data (e.g., total PO value, average ageing).
+- comparison: For comparing procurement data across groups, vendors, regions, or timeframes.
+- trend: For analyzing procurement metrics over time (e.g., monthly spend, PO count trend).
+- ranking: For finding top/bottom vendors, materials, or regions.
+- filtering: For listing specific POs, vendors, or invoices based on criteria.
+- visualization request: For questions explicitly asking for charts, graphs, or visual representations.
+- unrelated: Use this ONLY if the question is completely unrelated to procurement, purchase orders, vendors, materials, circles/regions, payments, invoices, or other topics in our procurement database (e.g., sports, movies, weather, general history, personal questions).
 
 Also decide if the user explicitly requested or strongly implied a chart or visualization.
 Generate a valid JSON object only with structure:
 {{
-  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request",
+  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request" | "unrelated",
   "visualization": true | false
 }}
 """
@@ -100,6 +101,19 @@ def sql_generator_node(state: AnalyticsState) -> dict:
     history = state.get("history", [])
     schema = get_db_schema()
     
+    intent_str = state.get("intent", "{}")
+    try:
+        intent_data = json.loads(intent_str)
+    except Exception:
+        intent_data = {}
+        
+    if intent_data.get("type") == "unrelated":
+        return {
+            "sql": "",
+            "validation_error": "unrelated",
+            "retry_count": 0
+        }
+        
     prompt = SQL_GENERATOR_PROMPT.format(
         schema=schema,
         business_glossary=BUSINESS_GLOSSARY,
@@ -118,6 +132,10 @@ def sql_generator_node(state: AnalyticsState) -> dict:
 
 def sql_validator_node(state: AnalyticsState) -> dict:
     """Validates query security parameters and syntax structures."""
+    validation_error = state.get("validation_error", "")
+    if validation_error == "unrelated":
+        return {"validation_error": "unrelated"}
+        
     sql = state.get("sql", "")
     if not sql:
         return {"validation_error": "No SQL query generated."}
@@ -198,6 +216,9 @@ def result_analysis_node(state: AnalyticsState) -> dict:
     query_result = state.get("query_result", [])
     validation_error = state.get("validation_error", "")
     
+    if validation_error == "unrelated":
+        return {"answer": "I could not answer this, could you ask me something related to procurement."}
+        
     if validation_error:
         return {"answer": f"### Error\nI encountered an error trying to process this request:\n\n`{validation_error}`"}
         
