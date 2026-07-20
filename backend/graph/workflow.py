@@ -15,7 +15,7 @@ def route_after_validation(state: AnalyticsState) -> str:
     """Routes state based on validation status and retry count."""
     error = state.get("validation_error")
     if error:
-        if state.get("retry_count", 0) >= 3 or error in ["unrelated", "modification"] or "Security violation" in error:
+        if state.get("retry_count", 0) >= 3 or error in ["unrelated", "modification", "ambiguous"] or "Security violation" in error:
             return "result_analysis"
         return "sql_fix"
     return "query_execution"

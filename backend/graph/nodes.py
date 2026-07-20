@@ -79,11 +79,12 @@ Identify the query intent from these types:
 - visualization request: For questions explicitly asking for charts, graphs, or visual representations.
 - unrelated: Use this ONLY if the question is completely unrelated to procurement, purchase orders, vendors, materials, circles/regions, payments, invoices, or other topics in our procurement database (e.g., sports, movies, weather, general history, personal questions).
 - modification: Use this if the user is asking to modify, drop, delete, update, insert, alter, or write data in the database (e.g., "drop rows", "delete vendor", "update status", "add a column", "create table").
+- ambiguous: Use this if the question is incomplete, lacks sufficient parameters, or is too vague to write a specific SQL query (e.g., "show me top PO", "get the purchase orders", "filter list").
 
 Also decide if the user explicitly requested or strongly implied a chart or visualization.
 Generate a valid JSON object only with structure:
 {{
-  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request" | "unrelated" | "modification",
+  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request" | "unrelated" | "modification" | "ambiguous",
   "visualization": true | false
 }}
 """
@@ -108,7 +109,7 @@ def sql_generator_node(state: AnalyticsState) -> dict:
     except Exception:
         intent_data = {}
         
-    if intent_data.get("type") in ["unrelated", "modification"]:
+    if intent_data.get("type") in ["unrelated", "modification", "ambiguous"]:
         return {
             "sql": "",
             "validation_error": intent_data.get("type"),
@@ -134,7 +135,7 @@ def sql_generator_node(state: AnalyticsState) -> dict:
 def sql_validator_node(state: AnalyticsState) -> dict:
     """Validates query security parameters and syntax structures."""
     validation_error = state.get("validation_error", "")
-    if validation_error in ["unrelated", "modification"]:
+    if validation_error in ["unrelated", "modification", "ambiguous"]:
         return {"validation_error": validation_error}
         
     sql = state.get("sql", "")
@@ -239,11 +240,41 @@ Do NOT include any markdown formatting wrappers or codeblocks. Simply return the
         res = llm.invoke(prompt)
         return {"answer": get_content_string(res.content)}
         
+    if validation_error == "ambiguous":
+        prompt = f"""You are a database assistant and procurement analyst.
+The user asked: "{question}".
+This question is too ambiguous, vague, or incomplete to construct a precise SQL database query (e.g., it asks for "top PO" but doesn't specify if it should be ranked by line amount, open commitment value, delay days, etc., or filtered by vendor/region).
+Politely explain what is missing or why the query cannot be generated directly.
+Suggest specific clarifications they can provide to help you answer, such as:
+- Do they want to rank POs by total amount, outstanding commitment, or ageing days?
+- Are they interested in a specific vendor, region, circle, or time period?
+Do NOT include any markdown formatting wrappers or codeblocks. Simply return the text response directly.
+"""
+        res = llm.invoke(prompt)
+        return {"answer": get_content_string(res.content)}
+        
     if validation_error:
         return {"answer": f"### Error\nI encountered an error trying to process this request:\n\n`{validation_error}`"}
         
-    if not query_result:
-        return {"answer": "### Summary\nNo records were found in the database that match your query parameters.\n\n### Key Details\n- Empty database result set returned.\n\n### Strategic Insights\n- Verify circles, vendor names, or date ranges in your input question."}
+    # Check if empty or only contains None values (common for SUM/AVG aggregate on empty rows)
+    is_empty = not query_result
+    if not is_empty and len(query_result) == 1:
+        first_val = list(query_result[0].values())[0]
+        if first_val is None:
+            is_empty = True
+
+    if is_empty:
+        prompt = f"""You are a database assistant and procurement analyst.
+The user asked: "{question}".
+The SQLite query generated was: "{sql}".
+However, this query returned no records or empty/NULL results from the database.
+Identify what specific search term, vendor, region, circle, or parameter in the user's question likely does not exist in the database (e.g., if they asked for a vendor like "Google" or a region like "North" that isn't in our procurement data).
+Generate a polite and conversational response explaining that no records were found matching those criteria.
+Suggest verifying the spelling of the vendor name, circle, or dates, and mention that they can query the database schema catalog or ask for a list of valid vendors/regions to see what data is available.
+Do NOT include any markdown formatting wrappers or codeblocks. Simply return the text response directly.
+"""
+        res = llm.invoke(prompt)
+        return {"answer": get_content_string(res.content)}
         
     prompt = RESPONSE_ANALYSIS_PROMPT.format(
         question=question,
