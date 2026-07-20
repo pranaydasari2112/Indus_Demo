@@ -78,11 +78,12 @@ Identify the query intent from these types:
 - filtering: For listing specific POs, vendors, or invoices based on criteria.
 - visualization request: For questions explicitly asking for charts, graphs, or visual representations.
 - unrelated: Use this ONLY if the question is completely unrelated to procurement, purchase orders, vendors, materials, circles/regions, payments, invoices, or other topics in our procurement database (e.g., sports, movies, weather, general history, personal questions).
+- modification: Use this if the user is asking to modify, drop, delete, update, insert, alter, or write data in the database (e.g., "drop rows", "delete vendor", "update status", "add a column", "create table").
 
 Also decide if the user explicitly requested or strongly implied a chart or visualization.
 Generate a valid JSON object only with structure:
 {{
-  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request" | "unrelated",
+  "type": "aggregation" | "comparison" | "trend" | "ranking" | "filtering" | "visualization request" | "unrelated" | "modification",
   "visualization": true | false
 }}
 """
@@ -107,10 +108,10 @@ def sql_generator_node(state: AnalyticsState) -> dict:
     except Exception:
         intent_data = {}
         
-    if intent_data.get("type") == "unrelated":
+    if intent_data.get("type") in ["unrelated", "modification"]:
         return {
             "sql": "",
-            "validation_error": "unrelated",
+            "validation_error": intent_data.get("type"),
             "retry_count": 0
         }
         
@@ -133,8 +134,8 @@ def sql_generator_node(state: AnalyticsState) -> dict:
 def sql_validator_node(state: AnalyticsState) -> dict:
     """Validates query security parameters and syntax structures."""
     validation_error = state.get("validation_error", "")
-    if validation_error == "unrelated":
-        return {"validation_error": "unrelated"}
+    if validation_error in ["unrelated", "modification"]:
+        return {"validation_error": validation_error}
         
     sql = state.get("sql", "")
     if not sql:
@@ -218,6 +219,17 @@ def result_analysis_node(state: AnalyticsState) -> dict:
     
     if validation_error == "unrelated":
         return {"answer": "I could not answer this, could you ask me something related to procurement."}
+        
+    if validation_error == "modification" or (validation_error and "Security violation" in validation_error):
+        prompt = f"""You are a read-only database assistant and procurement analyst.
+The user asked: "{question}".
+This request involves modifying, deleting, inserting, or altering the database structure/data (e.g., dropping rows/tables, updating columns).
+Explain politely and professionally that you are operating in a read-only environment, so database modifications, deletions, or schema changes are not allowed.
+Detail exactly what they requested and explain that you can only perform SELECT queries to analyze or display the data, but cannot write or modify it.
+Do NOT include any markdown formatting wrappers or codeblocks. Simply return the text response directly.
+"""
+        res = llm.invoke(prompt)
+        return {"answer": get_content_string(res.content)}
         
     if validation_error:
         return {"answer": f"### Error\nI encountered an error trying to process this request:\n\n`{validation_error}`"}
