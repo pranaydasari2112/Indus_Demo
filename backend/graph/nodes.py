@@ -218,7 +218,15 @@ def result_analysis_node(state: AnalyticsState) -> dict:
     validation_error = state.get("validation_error", "")
     
     if validation_error == "unrelated":
-        return {"answer": "I could not answer this, could you ask me something related to procurement."}
+        prompt = f"""You are a procurement analyst and assistant for a corporate purchase orders database.
+The user asked: "{question}".
+This request is completely unrelated to procurement, purchase orders, vendors, materials, circles/regions, payments, invoices, or other topics in our database.
+Explain politely, conversationally, and professionally that you cannot answer this because your expertise and database access are limited to procurement data and corporate analytics.
+Kindly ask the user to ask something related to procurement or the purchase orders database.
+Do NOT include any markdown formatting wrappers or codeblocks. Simply return the text response directly.
+"""
+        res = llm.invoke(prompt)
+        return {"answer": get_content_string(res.content)}
         
     if validation_error == "modification" or (validation_error and "Security violation" in validation_error):
         prompt = f"""You are a read-only database assistant and procurement analyst.
