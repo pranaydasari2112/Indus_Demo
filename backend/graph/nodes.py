@@ -74,12 +74,12 @@ Identify the query intent from these types:
 - aggregation: For summarizing, grouping, counting, or averaging procurement data (e.g., total PO value, average ageing).
 - comparison: For comparing procurement data across groups, vendors, regions, or timeframes.
 - trend: For analyzing procurement metrics over time (e.g., monthly spend, PO count trend).
-- ranking: For finding top/bottom vendors, materials, or regions.
-- filtering: For listing specific POs, vendors, or invoices based on criteria.
+- ranking: For finding top/bottom vendors, materials, or regions based on a specific metric.
+- filtering: For listing specific POs, vendors, or invoices based on specific criteria.
 - visualization request: For questions explicitly asking for charts, graphs, or visual representations.
 - unrelated: Use this ONLY if the question is completely unrelated to procurement, purchase orders, vendors, materials, circles/regions, payments, invoices, or other topics in our procurement database (e.g., sports, movies, weather, general history, personal questions).
 - modification: Use this if the user is asking to modify, drop, delete, update, insert, alter, or write data in the database (e.g., "drop rows", "delete vendor", "update status", "add a column", "create table").
-- ambiguous: Use this if the question is incomplete, lacks sufficient parameters, or is too vague to write a specific SQL query (e.g., "show me top PO", "get the purchase orders", "filter list").
+- ambiguous: Use this if the question is incomplete, lacks sufficient parameters, or is too vague to write a specific SQL query without making major assumptions (e.g., "show me top PO", "show me top pos", "list purchase orders", "get the purchase orders", "filter list"). If the user asks for "top" or "bottom" without specifying the metric (like line amount, open commitment value, or ageing days) or asks to "list/show/get POs" without specific filters/conditions, ALWAYS classify it as ambiguous.
 
 Also decide if the user explicitly requested or strongly implied a chart or visualization.
 Generate a valid JSON object only with structure:
